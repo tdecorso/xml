@@ -207,6 +207,101 @@ bool parse_Name(parser_t* p, string_view_t* name) {
     return true;
 }
 
+// S ::= (#x20 | #x9 | #xD | #xA)+
+void parse_S(parser_t* p) {
+    if (!p) return;
+    while (true) {
+        char next = peek(p);
+        if (next == '\0') break;
+        if (next != 0x20 && 
+            next != 0x09 &&
+            next != 0x0D &&
+            next != 0x0A) break;
+        adv(p);
+    }
+}
+
+// Eq ::= S? '=' S?
+bool parse_Eq(parser_t* p) {
+    if (!p) return false;
+    const char* start = p->cur;
+    parse_S(p);
+    if (!consume(p, '=')) {
+        p->cur = start;
+        return false;
+    }
+    parse_S(p);
+    return true;
+}
+
+// EntityRef ::= '&' Name ';'
+bool parse_EntityRef(parser_t* p, string_view_t* reference) {
+    return false;
+}
+
+// CharRef ::= '&#' [0-9]+ ';' | '&#x' [0-9a-fA-F]+ ';'	
+bool parse_CharRef(parser_t* p, string_view_t* reference) {
+    return false;
+}
+
+// Reference ::= EntityRef | CharRef 
+bool parse_Reference(parser_t* p, string_view_t* reference) {
+   return false; 
+}
+
+// AttValue ::= '"' ([^<&"] | Reference)* '"' |  "'" ([^<&'] | Reference)* "'"
+bool parse_AttValue(parser_t* p, string_view_t* value) {
+    if (!p) return false;
+
+    const char* start = p->cur;
+    char quote = peek(p) == '"' ? '"' : '\'';
+
+    if (!consume(p, quote)) {
+        p->cur = start;
+        return false;
+    }
+
+    const char* value_start = p->cur;
+
+    while (true) {
+        char next = peek(p);
+        if (next == '\0') {
+            p->cur = start;
+            return false;
+        }
+        if (next == '<' || next == '&'  || next == quote) break;
+        adv(p);
+    }
+
+    if (!consume(p, quote)) {
+        p->cur = start;
+        return false;
+    }
+
+    value->start = value_start;
+    value->len = p->cur - value_start - 1;
+    return true;
+}
+
+// Attribute ::= Name Eq AttValue
+bool parse_Attribute(parser_t* p, string_view_t* name, string_view_t* value) {
+    if (!p) return false;
+    const char* start = p->cur;
+    if (!parse_Name(p, name)) {
+        p->cur = start;
+        return false;
+    }
+    if (!parse_Eq(p)) {
+        p->cur = start;
+        return false;
+    }
+    if (!parse_AttValue(p, value)) {
+        p->cur = start;
+        return false;
+    }
+    return true;
+}
+
 // EmptyElemTag ::= '<' Name (S Attribute)* S? '/>'
 bool parse_EmptyElemTag(parser_t* p, string_view_t* name, attr_t** attrs) {
     const char* start = p->cur;
@@ -217,7 +312,14 @@ bool parse_EmptyElemTag(parser_t* p, string_view_t* name, attr_t** attrs) {
         p->cur = start;
         return false;
     }
-    printf("Got name: %.*s\n", name->len, name->start);
+    while (true) {
+        parse_S(p);
+        string_view_t attname;
+        string_view_t attvalue;
+        if (!parse_Attribute(p, &attname, &attvalue)) break;
+        printf("%.*s = \"%.*s\"\n", attname.len, attname.start, attvalue.len, attvalue.start);
+    }
+
     return true;
 }
 
@@ -225,7 +327,13 @@ bool parse_EmptyElemTag(parser_t* p, string_view_t* name, attr_t** attrs) {
 static xml_elem_t* parse_element(parser_t* p) {
     if (!p) return NULL;
     string_view_t name;
-    if (!parse_EmptyElemTag(p, &name, NULL)) return NULL;
+    // TODO add the attribute parsing
+    if (parse_EmptyElemTag(p, &name, NULL)) {
+        // TODO create a new element
+        // TODO assign the name and the attributes to the element
+        // TODO return the new element
+        return NULL;
+    }
     return NULL;
 }
 

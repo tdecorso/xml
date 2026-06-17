@@ -23,6 +23,7 @@ attr_array_t* attr_array_create(size_t capacity) {
     }
     arr->capacity = capacity;
     arr->count = 0;
+    return arr;
 }
 
 void attr_array_destroy(attr_array_t* arr) {
@@ -67,6 +68,8 @@ void xml_elem_destroy(xml_elem_t* elem) {
     if (!elem) return;
     attr_array_destroy(elem->attrs);
     if (elem->name) free(elem->name);
+    xml_elem_destroy(elem->child);
+    xml_elem_destroy(elem->next);
     free(elem);
 }
 
@@ -271,8 +274,9 @@ bool parse_Name(parser_t* p, string_view_t* name) {
 }
 
 // S ::= (#x20 | #x9 | #xD | #xA)+
-void parse_S(parser_t* p) {
-    if (!p) return;
+bool parse_S(parser_t* p) {
+    if (!p) return false;
+    const char* start = p->cur;
     while (true) {
         char next = peek(p);
         if (next == '\0') break;
@@ -282,6 +286,7 @@ void parse_S(parser_t* p) {
             next != 0x0A) break;
         adv(p);
     }
+    return start != p->cur;
 }
 
 // Eq ::= S? '=' S?
@@ -295,21 +300,6 @@ bool parse_Eq(parser_t* p) {
     }
     parse_S(p);
     return true;
-}
-
-// EntityRef ::= '&' Name ';'
-bool parse_EntityRef(parser_t* p, string_view_t* reference) {
-    return false;
-}
-
-// CharRef ::= '&#' [0-9]+ ';' | '&#x' [0-9a-fA-F]+ ';'	
-bool parse_CharRef(parser_t* p, string_view_t* reference) {
-    return false;
-}
-
-// Reference ::= EntityRef | CharRef 
-bool parse_Reference(parser_t* p, string_view_t* reference) {
-   return false; 
 }
 
 // AttValue ::= '"' ([^<&"] | Reference)* '"' |  "'" ([^<&'] | Reference)* "'"
@@ -332,9 +322,14 @@ bool parse_AttValue(parser_t* p, string_view_t* value) {
             p->cur = start;
             return false;
         }
-        if (next == '<' || next == '&'  || next == quote) break;
+        if (next == '<' || next == '&') {
+            p->cur = start;
+            return false;
+        }
+        if (next == quote) break;
         adv(p);
     }
+
 
     if (!consume(p, quote)) {
         p->cur = start;
@@ -365,8 +360,19 @@ bool parse_Attribute(parser_t* p, string_view_t* name, string_view_t* value) {
     return true;
 }
 
+void attr_array_clear(attr_array_t* arr) {
+    if (!arr) return;
+    for (size_t i = 0; i < arr->count; i++) {
+        if (arr->data[i].name) free(arr->data[i].name);
+        if (arr->data[i].value) free(arr->data[i].value);
+    }
+    arr->count = 0;
+}
+
 // EmptyElemTag ::= '<' Name (S Attribute)* S? '/>'
 bool parse_EmptyElemTag(parser_t* p, string_view_t* name, attr_array_t* attrs) {
+    if (!p || !name || !attrs) return false;
+
     const char* start = p->cur;
     if (!consume(p, '<')) {
         return false; 
@@ -375,13 +381,19 @@ bool parse_EmptyElemTag(parser_t* p, string_view_t* name, attr_array_t* attrs) {
         p->cur = start;
         return false;
     }
+
+
     while (true) {
-        parse_S(p);
+        const char* beforeS = p->cur;
+        if (!parse_S(p)) break;
 
         string_view_t attname;
         string_view_t attvalue;
 
-        if (!parse_Attribute(p, &attname, &attvalue)) break;
+        if (!parse_Attribute(p, &attname, &attvalue)) {
+            p->cur = beforeS;
+            break;
+        }
 
         if (!attr_array_append(attrs, attname, attvalue)) {
             p->cur = start;
@@ -392,21 +404,122 @@ bool parse_EmptyElemTag(parser_t* p, string_view_t* name, attr_array_t* attrs) {
     parse_S(p);
     if (!consume(p, '/') || !consume(p, '>')) {
         p->cur = start;
+        attr_array_clear(attrs);
         return false;
     }
 
     return true;
 }
 
+// STag ::= '<' Name (S Attribute)* S? '>'
+bool parse_STag(parser_t* p, string_view_t* name, attr_array_t* attrs) {
+    const char* start = p->cur;
+    if (!consume(p, '<')) {
+        return false; 
+    }
+    if (!parse_Name(p, name)) {
+        p->cur = start;
+        return false;
+    }
+    while (true) {
+        const char* beforeS = p->cur;
+        if (!parse_S(p)) break;
+
+        string_view_t attname;
+        string_view_t attvalue;
+
+        if (!parse_Attribute(p, &attname, &attvalue)) {
+            p->cur = beforeS;
+            break;
+        }
+
+        if (!attr_array_append(attrs, attname, attvalue)) {
+            p->cur = start;
+            return false;
+        }
+    }
+
+    parse_S(p);
+    if (!consume(p, '>')) {
+        attr_array_clear(attrs);
+        p->cur = start;
+        return false;
+    }
+
+    return true;
+}
+
+static xml_elem_t* parse_element(parser_t* p);
+
+// content ::= CharData? ((element | Reference | CDSect | PI | Comment) CharData?)*
+bool parse_content(parser_t* p, xml_elem_t* parent) {
+    if (!p) return false;
+    if (!parent) return false;
+    parse_S(p);
+    while (true) {
+        xml_elem_t* elem = parse_element(p);
+        if (!elem) break;
+        if (parent->child == NULL) {
+            parent->child = elem;
+        }
+        else {
+            xml_elem_t* iter = parent->child;
+            while (iter->next != NULL) {
+                iter = iter->next;
+            }
+            iter->next = elem;
+        }
+        parse_S(p);
+    }
+    parse_S(p);
+    
+    return true;
+}
+
+// ETag ::= '</' Name S? '>'
+bool parse_ETag(parser_t* p, string_view_t expected) {
+    if (!p) return false;
+    const char* start = p->cur;
+    if (!consume(p, '<') || !consume(p, '/')) {
+        p->cur = start;
+        return false;
+    }
+    string_view_t name;
+    if (!parse_Name(p, &name)) {
+        p->cur = start;
+        return false;
+    }
+    parse_S(p);
+    if (!consume(p, '>')) {
+        p->cur = start;
+        return false;
+    }
+    if (expected.len != name.len) return false;
+    if (strncmp(expected.start, name.start, name.len) != 0) return false;
+    return true;
+}
+
 // element ::= EmptyElemTag | STag content ETag
 static xml_elem_t* parse_element(parser_t* p) {
     if (!p) return NULL;
+    const char* start = p->cur;
     string_view_t name;
-    attr_array_t* attrs = attr_array_create(4);
+    attr_array_t* attrs = attr_array_create(8);
     if (parse_EmptyElemTag(p, &name, attrs)) {
         xml_elem_t* elem = xml_elem_create();
         elem->name = strndup(name.start, name.len);
         elem->attrs = attrs;
+        return elem;
+    }
+    if (parse_STag(p, &name, attrs)) {
+        xml_elem_t* elem = xml_elem_create();
+        elem->name = strndup(name.start, name.len);
+        elem->attrs = attrs;
+        if (!parse_content(p, elem) || !parse_ETag(p, name)) {
+            xml_elem_destroy(elem);
+            p->cur = start;
+            return NULL;
+        }
         return elem;
     }
     attr_array_destroy(attrs);

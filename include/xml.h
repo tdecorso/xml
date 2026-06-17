@@ -15,9 +15,11 @@ typedef struct {
     size_t capacity;
 } attr_array_t;
 
-typedef struct {
+typedef struct xml_elem {
     char* name;
     attr_array_t* attrs;
+    struct xml_elem* child;
+    struct xml_elem* next;
 } xml_elem_t;
 
 typedef struct {

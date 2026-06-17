@@ -13,11 +13,74 @@ typedef struct {
     size_t len;
 } string_view_t;
 
-typedef struct attr {
-    string_view_t name;
-    string_view_t value;
-    struct attr* next;
-} attr_t;
+attr_array_t* attr_array_create(size_t capacity) {
+    attr_array_t* arr = malloc(sizeof(attr_array_t));
+    if (!arr) return NULL;
+    arr->data = malloc(sizeof(attr_t) * capacity);
+    if (!arr->data) {
+        free(arr);
+        return NULL;
+    }
+    arr->capacity = capacity;
+    arr->count = 0;
+}
+
+void attr_array_destroy(attr_array_t* arr) {
+    if (!arr) return;
+    for (size_t i = 0; i < arr->count; i++) {
+        if (arr->data[i].name) free(arr->data[i].name);
+        if (arr->data[i].value) free(arr->data[i].value);
+    }
+    free(arr->data);
+    free(arr);
+}
+
+bool attr_array_append(attr_array_t* a,
+                       string_view_t name,
+                       string_view_t value) {
+    if (!a) return false;
+
+    if (a->count == a->capacity) {
+        size_t new_cap = (a->capacity == 0) ? 4 : a->capacity * 2;
+        attr_t* new_data =
+            realloc(a->data, new_cap * sizeof(attr_t));
+        if (!new_data) return false;
+
+        a->data = new_data;
+        a->capacity = new_cap;
+    }
+
+    a->data[a->count].name = strndup(name.start, name.len);
+    a->data[a->count].value = strndup(value.start, value.len);
+    a->count++;
+
+    return true;
+}
+
+xml_elem_t* xml_elem_create() {
+    xml_elem_t* elem = calloc(1, sizeof(xml_elem_t));
+    if (!elem) return NULL;
+    return elem;
+}
+
+void xml_elem_destroy(xml_elem_t* elem) {
+    if (!elem) return;
+    attr_array_destroy(elem->attrs);
+    if (elem->name) free(elem->name);
+    free(elem);
+}
+
+xml_doc_t* xml_doc_create() {
+    xml_doc_t* doc = calloc(1, sizeof(xml_doc_t));
+    if (!doc) return NULL;
+    return doc;
+}
+
+void xml_doc_destroy(xml_doc_t* doc) {
+    if (!doc) return;
+    xml_elem_destroy(doc->root);
+    free(doc);
+}
 
 static char peek(parser_t* p) {
     if (!p) return '\0';
@@ -303,7 +366,7 @@ bool parse_Attribute(parser_t* p, string_view_t* name, string_view_t* value) {
 }
 
 // EmptyElemTag ::= '<' Name (S Attribute)* S? '/>'
-bool parse_EmptyElemTag(parser_t* p, string_view_t* name, attr_t** attrs) {
+bool parse_EmptyElemTag(parser_t* p, string_view_t* name, attr_array_t* attrs) {
     const char* start = p->cur;
     if (!consume(p, '<')) {
         return false; 
@@ -314,10 +377,22 @@ bool parse_EmptyElemTag(parser_t* p, string_view_t* name, attr_t** attrs) {
     }
     while (true) {
         parse_S(p);
+
         string_view_t attname;
         string_view_t attvalue;
+
         if (!parse_Attribute(p, &attname, &attvalue)) break;
-        printf("%.*s = \"%.*s\"\n", attname.len, attname.start, attvalue.len, attvalue.start);
+
+        if (!attr_array_append(attrs, attname, attvalue)) {
+            p->cur = start;
+            return false;
+        }
+    }
+
+    parse_S(p);
+    if (!consume(p, '/') || !consume(p, '>')) {
+        p->cur = start;
+        return false;
     }
 
     return true;
@@ -327,31 +402,39 @@ bool parse_EmptyElemTag(parser_t* p, string_view_t* name, attr_t** attrs) {
 static xml_elem_t* parse_element(parser_t* p) {
     if (!p) return NULL;
     string_view_t name;
-    // TODO add the attribute parsing
-    if (parse_EmptyElemTag(p, &name, NULL)) {
-        // TODO create a new element
-        // TODO assign the name and the attributes to the element
-        // TODO return the new element
-        return NULL;
+    attr_array_t* attrs = attr_array_create(4);
+    if (parse_EmptyElemTag(p, &name, attrs)) {
+        xml_elem_t* elem = xml_elem_create();
+        elem->name = strndup(name.start, name.len);
+        elem->attrs = attrs;
+        return elem;
     }
+    attr_array_destroy(attrs);
     return NULL;
 }
 
 xml_doc_t* xml_doc_from_file(const char* filename) {
     size_t len;
-    const char* xml = read_file(filename, &len);
+    char* xml = read_file(filename, &len);
     if (!xml) return NULL;
 
     parser_t p = {xml, xml + len};
 
     xml_elem_t* root =  parse_element(&p);
 
-    if (!root) return NULL;
+    if (!root) {
+        free(xml);
+        return NULL;
+    }
 
-    xml_doc_t* doc = malloc(sizeof(xml_doc_t));
-    if (!doc) return NULL;
+    xml_doc_t* doc = xml_doc_create();
+    if (!doc) {
+        free(xml);
+        return NULL;
+    }
 
     doc->root = root;
 
+    free(xml);
     return doc;
 }
